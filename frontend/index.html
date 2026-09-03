@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CoA &rarr; Word Template Filler</title>
+<link rel="stylesheet" href="shared.css" />
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <nav class="navbar">
+      <a href="index.html" class="active">PDF &rarr; Word</a>
+      <a href="compare.html">Compare COA</a>
+      <a href="customers.html">Customers</a>
+      <a href="forms.html">Document Forms</a>
+    </nav>
+    <h1>CoA &rarr; Word Template Filler</h1>
+    <p>Upload a Certificate of Analysis PDF, pick a Word template (or keep the PDF's own layout), and let AI dump the text, tables and signature into it &mdash; fully editable afterward.</p>
+  </header>
+
+  <div class="card">
+    <h2>1. Upload PDF</h2>
+    <div class="field">
+      <div class="dropzone" id="dropzone">
+        <div class="icon">&#128196;</div>
+        <div>Click to choose a PDF, or drag one here</div>
+        <div class="fname" id="fname"></div>
+      </div>
+      <input type="file" id="fileInput" accept="application/pdf" style="display:none" />
+    </div>
+
+    <h2>2. Choose the target Word template</h2>
+    <div class="field">
+      <select id="templateSelect"><option>Loading templates&hellip;</option></select>
+      <div class="hint">The first option keeps the PDF's own design/layout instead of using a company template. Company templates are read from the server's <code>templates/</code> folder &mdash; drop new .docx files in there and reload this page to add more.</div>
+    </div>
+
+    <details class="field">
+      <summary>Advanced: OpenAI API key / model override</summary>
+      <div style="margin-top:10px;">
+        <label>OpenAI API key</label>
+        <input type="password" id="apiKey" placeholder="Leave blank to use OPENAI_API_KEY from the server's .env" />
+        <div class="hint">Only needed here if you haven't set <code>OPENAI_API_KEY</code> in the backend's <code>.env</code> file. Never stored &mdash; sent only with this request.</div>
+        <label style="margin-top:12px;">Model</label>
+        <input type="text" id="modelInput" placeholder="gpt-4o (default)" />
+      </div>
+    </details>
+
+    <button class="primary" id="generateBtn">Generate filled document</button>
+    <div class="status" id="status" style="display:none;">
+      <div class="spinner"></div>
+      <span id="statusText">Working&hellip;</span>
+    </div>
+  </div>
+
+  <div class="card" id="resultCard" style="display:none;">
+    <h2>Result</h2>
+    <div id="resultBody"></div>
+  </div>
+</div>
+
+<script>
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const fnameEl = document.getElementById('fname');
+const templateSelect = document.getElementById('templateSelect');
+const generateBtn = document.getElementById('generateBtn');
+const statusEl = document.getElementById('status');
+const statusText = document.getElementById('statusText');
+const resultCard = document.getElementById('resultCard');
+const resultBody = document.getElementById('resultBody');
+
+let selectedFile = null;
+
+dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('drag'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag'));
+dropzone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropzone.classList.remove('drag');
+  if (e.dataTransfer.files.length) {
+    selectedFile = e.dataTransfer.files[0];
+    fnameEl.textContent = selectedFile.name;
+  }
+});
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length) {
+    selectedFile = fileInput.files[0];
+    fnameEl.textContent = selectedFile.name;
+  }
+});
+
+async function loadTemplates() {
+  try {
+    const res = await fetch('/api/templates');
+    const templates = await res.json();
+    templateSelect.innerHTML = '';
+    if (!templates.length) {
+      templateSelect.innerHTML = '<option value="">No templates found in templates/</option>';
+      return;
+    }
+    for (const t of templates) {
+      const opt = document.createElement('option');
+      opt.value = t.id;
+      opt.textContent = t.name;
+      templateSelect.appendChild(opt);
+    }
+  } catch (e) {
+    templateSelect.innerHTML = '<option value="">Failed to load templates</option>';
+  }
+}
+loadTemplates();
+
+function setBusy(busy, text) {
+  generateBtn.disabled = busy;
+  statusEl.style.display = busy ? 'flex' : 'none';
+  if (text) statusText.textContent = text;
+}
+
+function renderList(items, emptyLabel) {
+  if (!items || !items.length) return `<div class="muted">${emptyLabel}</div>`;
+  return `<ul class="field-list">${items.map(i => `<li>${escapeHtml(String(i))}</li>`).join('')}</ul>`;
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function signatureBadge(status) {
+  const okStatuses = ['replaced_existing_image_at_anchor', 'appended_at_keyword_anchor', 'replaced_last_image_fallback'];
+  if (okStatuses.includes(status)) return '<span class="badge ok">Inserted</span>';
+  if (status === 'no_signature_detected') return '<span class="badge warn">None found in source PDF</span>';
+  return '<span class="badge warn">Not placed &mdash; add manually</span>';
+}
+
+generateBtn.addEventListener('click', async () => {
+  if (!selectedFile) { alert('Choose a PDF first.'); return; }
+  const templateId = templateSelect.value;
+  if (!templateId) { alert('Choose a template.'); return; }
+
+  const form = new FormData();
+  form.append('file', selectedFile);
+  form.append('template_id', templateId);
+  const apiKey = document.getElementById('apiKey').value.trim();
+  const model = document.getElementById('modelInput').value.trim();
+  if (apiKey) form.append('api_key', apiKey);
+  if (model) form.append('model', model);
+
+  const isPreserveLayout = templateId === '__preserve_layout__';
+  resultCard.style.display = 'none';
+  setBusy(true, isPreserveLayout ? 'Reading PDF and rebuilding it as a Word document…' : 'Reading PDF and calling OpenAI — this can take 10–30s…');
+
+  try {
+    const res = await fetch('/api/generate', { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.detail || 'Request failed');
+    }
+    if (data.mode === 'preserve_layout') {
+      renderLayoutResult(data);
+    } else {
+      renderResult(data);
+    }
+  } catch (e) {
+    resultCard.style.display = 'block';
+    resultBody.innerHTML = `<div class="error-box">${escapeHtml(e.message)}</div>`;
+  } finally {
+    setBusy(false);
+  }
+});
+
+function renderLayoutResult(data) {
+  resultCard.style.display = 'block';
+  const r = data.layout_report || {};
+  const ocrPages = r.ocr_pages_used || 0;
+  const ocrBadge = ocrPages > 0
+    ? `<div style="margin-top:12px;"><span class="badge ok">${ocrPages} scanned page${ocrPages > 1 ? 's' : ''} read automatically</span>
+       <span class="muted"> — no selectable text was found on ${ocrPages > 1 ? 'these pages' : 'this page'}, so it was read directly from the image.</span></div>`
+    : (r.ocr_available === false
+        ? `<div style="margin-top:12px;"><span class="badge warn">OCR engine not available on this server</span>
+           <span class="muted"> — scanned/photographed pages will come through as a picture only.</span></div>`
+        : '');
+  resultBody.innerHTML = `
+    <a class="download-btn" href="${data.download_url}" download="${escapeHtml(data.download_filename)}">&#11015; Download ${escapeHtml(data.download_filename)}</a>
+    <div class="result-grid">
+      <div class="stat"><div class="n">${r.paragraphs ?? 0}</div><div class="l">text blocks</div></div>
+      <div class="stat"><div class="n">${r.tables ?? 0}</div><div class="l">tables rebuilt</div></div>
+      <div class="stat"><div class="n">${r.images ?? 0}</div><div class="l">images placed</div></div>
+    </div>
+    ${ocrBadge}
+    <p class="muted" style="margin-top:16px;">This mode reconstructs the PDF's reading order, tables, and images into a
+    new Word document with no company template involved. Pages with real selectable text are read directly; pages that
+    are actually a scan or photo are read automatically the same way, including any logos or stamps. It's a
+    best-effort reconstruction, not a pixel-perfect clone (fonts/margins may differ slightly) — tables with visible
+    grid lines convert cleanly; borderless/whitespace-aligned "tables" come through as plain text in the correct
+    order, and scanned pages may have a little more OCR noise than a normal PDF. Review before use.</p>
+  `;
+}
+
+function renderResult(data) {
+  resultCard.style.display = 'block';
+  const hf = data.fill_report.header_fields;
+  const tr = data.fill_report.test_results;
+  const sig = data.fill_report.signature;
+  const ex = data.extraction || { header_fields: [], test_results: [], signature_detected: false };
+
+  const extractedHeaderRows = (ex.header_fields || [])
+    .map(f => `<tr><td>${escapeHtml(f.label)}</td><td>${escapeHtml(f.value)}</td></tr>`)
+    .join('');
+  const extractedTestRows = (ex.test_results || [])
+    .map(r => `<tr><td>${escapeHtml(r.parameter)}</td><td>${escapeHtml(r.specification || '')}</td><td>${escapeHtml(r.result || '')}</td></tr>`)
+    .join('');
+
+  const nothingExtracted = (ex.header_fields || []).length === 0 && (ex.test_results || []).length === 0;
+
+  resultBody.innerHTML = `
+    <a class="download-btn" href="${data.download_url}" download="${escapeHtml(data.download_filename)}">&#11015; Download ${escapeHtml(data.download_filename)}</a>
+
+    ${nothingExtracted ? `<div class="error-box" style="margin-bottom:16px;">
+      The AI didn't return any header fields or test results for this PDF — so there was nothing to place into the
+      template. This points to a PDF-reading problem (scan quality, wrong model, or an API-side issue), not a
+      template-matching problem. Check the "What the AI actually read" section below (it will be empty) and see
+      the troubleshooting notes in README.md.
+    </div>` : ''}
+
+    <div class="result-grid">
+      <div class="stat"><div class="n">${hf.matched.length}</div><div class="l">header fields filled</div></div>
+      <div class="stat"><div class="n">${tr.matched}</div><div class="l">test result rows updated</div></div>
+      <div class="stat"><div class="n">${tr.appended}</div><div class="l">new test rows appended</div></div>
+      <div class="stat"><div class="n">${tr.deleted || 0}</div><div class="l">template-only rows removed</div></div>
+      <div class="stat"><div class="n">${signatureBadge(sig.status)}</div><div class="l">signature / stamp</div></div>
+    </div>
+
+    <details ${nothingExtracted ? 'open' : ''}>
+      <summary>What the AI actually read from your PDF (${(ex.header_fields||[]).length} fields, ${(ex.test_results||[]).length} test rows, signature: ${ex.signature_detected ? 'yes' : 'no'})</summary>
+      <div style="margin-top:10px; overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; font-size:12px;">
+          <thead><tr><th style="text-align:left; padding:4px; border-bottom:1px solid #e2e8f0;">Label</th><th style="text-align:left; padding:4px; border-bottom:1px solid #e2e8f0;">Value</th></tr></thead>
+          <tbody>${extractedHeaderRows || '<tr><td colspan="2" class="muted" style="padding:4px;">No header fields extracted.</td></tr>'}</tbody>
+        </table>
+        <table style="width:100%; border-collapse:collapse; font-size:12px; margin-top:10px;">
+          <thead><tr><th style="text-align:left; padding:4px; border-bottom:1px solid #e2e8f0;">Parameter</th><th style="text-align:left; padding:4px; border-bottom:1px solid #e2e8f0;">Specification</th><th style="text-align:left; padding:4px; border-bottom:1px solid #e2e8f0;">Result</th></tr></thead>
+          <tbody>${extractedTestRows || '<tr><td colspan="3" class="muted" style="padding:4px;">No test rows extracted.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </details>
+    <br/>
+    <details open>
+      <summary>Header fields extracted but not placed (${hf.unmatched_extracted_fields.length})</summary>
+      ${renderList(hf.unmatched_extracted_fields, 'None — everything extracted was placed somewhere in the template.')}
+    </details>
+    <br/>
+    <details>
+      <summary>Template rows removed (no matching test found in the PDF) (${tr.unmatched_template_rows.length})</summary>
+      ${renderList(tr.unmatched_template_rows, 'None.')}
+    </details>
+    <p class="muted" style="margin-top:16px;">Open the downloaded .docx in Word and double-check the highlighted areas above &mdash; everything remains fully editable.</p>
+  `;
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Document Forms</title>
+<link rel="stylesheet" href="shared.css" />
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <nav class="navbar">
+      <a href="index.html">PDF &rarr; Word</a>
+      <a href="compare.html">Compare COA</a>
+      <a href="customers.html">Customers</a>
+      <a href="forms.html" class="active">Document Forms</a>
+    </nav>
+    <h1>Document Forms</h1>
+    <p>Upload the COA(s) for this shipment, pick the customer and the form, upload the supplier's source documents,
+      and get back ready-to-send Invoice / Packing List / Certificate of Origin Word files.</p>
+  </header>
+
+  <div class="card">
+    <h2>1. COA file(s)</h2>
+    <p class="muted" style="margin-top:-6px;margin-bottom:10px;">One shipment can cover several materials/recipes &mdash; upload one COA per material.</p>
+    <div class="dropzone" id="dropzoneCoa">
+      <div class="icon">&#128196;</div>
+      <div>Click or drag COA file(s) here</div>
+      <div class="fname" id="fnameCoa"></div>
+    </div>
+    <input type="file" id="fileInputCoa" accept=".pdf,.docx,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tiff" multiple style="display:none" />
+
+    <h2 style="margin-top:22px;">2. Customer</h2>
+    <div class="field">
+      <select id="customerSelect"><option value="">Loading customers&hellip;</option></select>
+    </div>
+
+    <h2 style="margin-top:22px;">3. Form</h2>
+    <div class="field">
+      <select id="formSelect"><option value="">Loading forms&hellip;</option></select>
+    </div>
+    <div id="formHint" class="muted" style="margin-top:6px;"></div>
+
+    <h2 style="margin-top:22px;">4. Supplier documents</h2>
+    <p class="muted" style="margin-top:-6px;margin-bottom:10px;">Invoice/packing paperwork from the supplier &mdash; batch numbers, dates, packaging, prices, etc.</p>
+    <div class="dropzone" id="dropzoneDocs">
+      <div class="icon">&#128196;</div>
+      <div>Click or drag supplier document(s) here</div>
+      <div class="fname" id="fnameDocs"></div>
+    </div>
+    <input type="file" id="fileInputDocs" accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tiff" multiple style="display:none" />
+
+    <details class="field" style="margin-top:18px;">
+      <summary>Advanced: OpenAI API key / model override</summary>
+      <div style="margin-top:10px;">
+        <label>OpenAI API key</label>
+        <input type="password" id="apiKey" placeholder="Leave blank to use OPENAI_API_KEY from the server's .env" />
+        <label style="margin-top:12px;">Model</label>
+        <input type="text" id="modelInput" placeholder="gpt-4o (default)" />
+      </div>
+    </details>
+
+    <button class="primary" id="generateBtn" style="margin-top:14px;">5. Generate documents</button>
+    <div class="status" id="status" style="display:none;">
+      <div class="spinner"></div>
+      <span id="statusText">Working&hellip;</span>
+    </div>
+  </div>
+
+  <div class="card" id="resultCard" style="display:none;">
+    <h2>Result</h2>
+    <div id="resultBody"></div>
+  </div>
+</div>
+
+<script>
+let coaFiles = [], docFiles = [];
+let formsList = [];
+
+function wireDropzone(zoneId, inputId, fnameId, onPick) {
+  const zone = document.getElementById(zoneId);
+  const input = document.getElementById(inputId);
+  const fname = document.getElementById(fnameId);
+  const show = (files) => { fname.textContent = files.length ? `${files.length} file(s): ${Array.from(files).map(f => f.name).join(', ')}` : ''; };
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('drag'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault(); zone.classList.remove('drag');
+    if (e.dataTransfer.files.length) { onPick(e.dataTransfer.files); show(e.dataTransfer.files); }
+  });
+  input.addEventListener('change', () => {
+    if (input.files.length) { onPick(input.files); show(input.files); }
+  });
+}
+wireDropzone('dropzoneCoa', 'fileInputCoa', 'fnameCoa', (files) => coaFiles = Array.from(files));
+wireDropzone('dropzoneDocs', 'fileInputDocs', 'fnameDocs', (files) => docFiles = Array.from(files));
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function loadCustomers() {
+  const sel = document.getElementById('customerSelect');
+  try {
+    const res = await fetch('/api/customers');
+    const customers = await res.json();
+    if (!customers.length) { sel.innerHTML = '<option value="">No customers yet — add one on the Customers page</option>'; return; }
+    sel.innerHTML = customers.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join('');
+  } catch (e) {
+    sel.innerHTML = '<option value="">Failed to load customers</option>';
+  }
+}
+
+async function loadForms() {
+  const sel = document.getElementById('formSelect');
+  try {
+    const res = await fetch('/api/forms');
+    formsList = await res.json();
+    sel.innerHTML = formsList.map(f => `<option value="${escapeHtml(f.id)}" ${f.available ? '' : 'disabled'}>${escapeHtml(f.name)}${f.available ? '' : ' (coming soon)'}</option>`).join('');
+    updateFormHint();
+  } catch (e) {
+    sel.innerHTML = '<option value="">Failed to load forms</option>';
+  }
+}
+function updateFormHint() {
+  const id = document.getElementById('formSelect').value;
+  const f = formsList.find(x => x.id === id);
+  document.getElementById('formHint').textContent = f ? `Generates: ${f.docs.join(', ')}` : '';
+}
+document.getElementById('formSelect').addEventListener('change', updateFormHint);
+
+loadCustomers();
+loadForms();
+
+const statusEl = document.getElementById('status');
+const statusText = document.getElementById('statusText');
+const resultCard = document.getElementById('resultCard');
+const resultBody = document.getElementById('resultBody');
+
+function setBusy(busy, text) {
+  document.getElementById('generateBtn').disabled = busy;
+  statusEl.style.display = busy ? 'flex' : 'none';
+  if (text) statusText.textContent = text;
+}
+
+document.getElementById('generateBtn').addEventListener('click', async () => {
+  const customerId = document.getElementById('customerSelect').value;
+  const formId = document.getElementById('formSelect').value;
+  if (!coaFiles.length) { alert('Upload at least one COA file.'); return; }
+  if (!customerId) { alert('Choose a customer.'); return; }
+  if (!formId) { alert('Choose a form.'); return; }
+
+  const form = new FormData();
+  form.append('customer_id', customerId);
+  form.append('form_id', formId);
+  coaFiles.forEach(f => form.append('coa_files', f));
+  docFiles.forEach(f => form.append('supplier_files', f));
+  const apiKey = document.getElementById('apiKey').value.trim();
+  const model = document.getElementById('modelInput').value.trim();
+  if (apiKey) form.append('api_key', apiKey);
+  if (model) form.append('model', model);
+
+  resultCard.style.display = 'none';
+  setBusy(true, 'Reading the COA(s) and supplier docs, extracting the shipment with OpenAI, and filling the form — this can take 10–40s…');
+
+  try {
+    const res = await fetch('/api/forms/generate', { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Request failed');
+    renderResult(data);
+  } catch (e) {
+    resultCard.style.display = 'block';
+    resultBody.innerHTML = `<div class="error-box">${escapeHtml(e.message)}</div>`;
+  } finally {
+    setBusy(false);
+  }
+});
+
+function renderResult(data) {
+  resultCard.style.display = 'block';
+  let links = '';
+  for (const [key, file] of Object.entries(data.files)) {
+    links += `<a href="${file.download_url}" download style="display:inline-block;margin:4px 8px 4px 0;padding:8px 14px;border:1px solid var(--accent);border-radius:8px;color:var(--accent);font-size:13px;font-weight:600;text-decoration:none;">&#11015; ${escapeHtml(file.filename)}</a>`;
+  }
+
+  let itemRows = '';
+  for (const item of (data.shipment.items || [])) {
+    itemRows += `<tr>
+      <td>${escapeHtml(item.material_name)}</td>
+      <td>${escapeHtml(item.batch_no)}</td>
+      <td>${escapeHtml(item.quantity_text)}</td>
+      <td>${escapeHtml(item.unit_price)} ${escapeHtml(item.currency)}</td>
+      <td>${escapeHtml(item.manufacturer)}</td>
+    </tr>`;
+  }
+
+  resultBody.innerHTML = `
+    <p><strong>${escapeHtml(data.customer)}</strong> &mdash; ${escapeHtml(data.form_id)}</p>
+    <div style="margin:14px 0;">${links}</div>
+
+    <h3 style="font-size:14px; margin-bottom:8px;">What the AI extracted</h3>
+    <table class="plain" style="margin-bottom:14px;">
+      <tr><td>Invoice No.</td><td>${escapeHtml(data.shipment.invoice_no)}</td></tr>
+      <tr><td>Invoice Date</td><td>${escapeHtml(data.shipment.invoice_date)}</td></tr>
+      <tr><td>Origin</td><td>${escapeHtml(data.shipment.origin)} <span class="muted">(${escapeHtml(data.shipment.origin_evidence)})</span></td></tr>
+      <tr><td>Total packages</td><td>${escapeHtml(data.shipment.total_package_description)}</td></tr>
+    </table>
+    <table class="plain">
+      <thead><tr><th>Material</th><th>Batch</th><th>Qty</th><th>Unit Price</th><th>Manufacturer</th></tr></thead>
+      <tbody>${itemRows}</tbody>
+    </table>
+    <p class="muted" style="margin-top:10px;">Double-check the extracted values above against the source documents before sending — the generated .docx files are fully editable if anything needs a tweak.</p>
+  `;
+}
+</script>
+</body>
+</html>

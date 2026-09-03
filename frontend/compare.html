@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Compare COA</title>
+<link rel="stylesheet" href="shared.css" />
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <nav class="navbar">
+      <a href="index.html">PDF &rarr; Word</a>
+      <a href="compare.html" class="active">Compare COA</a>
+      <a href="customers.html">Customers</a>
+      <a href="forms.html">Document Forms</a>
+    </nav>
+    <h1>Compare COA vs. another document</h1>
+    <p>Upload a Certificate of Analysis and any other document (PDF, Word, or image) &mdash; AI checks whether the material
+      name, recipe/batch number, manufacturing date, expiry date, and country of origin agree between them.</p>
+  </header>
+
+  <div class="card">
+    <div class="two-col">
+      <div>
+        <h2>1. COA</h2>
+        <div class="dropzone" id="dropzoneCoa">
+          <div class="icon">&#128196;</div>
+          <div>Click or drag the COA file here</div>
+          <div class="fname" id="fnameCoa"></div>
+        </div>
+        <input type="file" id="fileInputCoa" accept=".pdf,.docx,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tiff" style="display:none" />
+      </div>
+      <div>
+        <h2>2. Other document</h2>
+        <div class="dropzone" id="dropzoneOther">
+          <div class="icon">&#128196;</div>
+          <div>Click or drag the other file here</div>
+          <div class="fname" id="fnameOther"></div>
+        </div>
+        <input type="file" id="fileInputOther" accept=".pdf,.docx,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tiff" style="display:none" />
+      </div>
+    </div>
+
+    <details class="field" style="margin-top:18px;">
+      <summary>Advanced: OpenAI API key / model override</summary>
+      <div style="margin-top:10px;">
+        <label>OpenAI API key</label>
+        <input type="password" id="apiKey" placeholder="Leave blank to use OPENAI_API_KEY from the server's .env" />
+        <label style="margin-top:12px;">Model</label>
+        <input type="text" id="modelInput" placeholder="gpt-4o (default)" />
+      </div>
+    </details>
+
+    <button class="primary" id="compareBtn" style="margin-top:14px;">Compare documents</button>
+    <div class="status" id="status" style="display:none;">
+      <div class="spinner"></div>
+      <span id="statusText">Working&hellip;</span>
+    </div>
+  </div>
+
+  <div class="card" id="resultCard" style="display:none;">
+    <h2>Result</h2>
+    <div id="resultBody"></div>
+  </div>
+</div>
+
+<script>
+let coaFile = null, otherFile = null;
+
+function wireDropzone(zoneId, inputId, fnameId, onPick) {
+  const zone = document.getElementById(zoneId);
+  const input = document.getElementById(inputId);
+  const fname = document.getElementById(fnameId);
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('drag'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault(); zone.classList.remove('drag');
+    if (e.dataTransfer.files.length) { onPick(e.dataTransfer.files[0]); fname.textContent = e.dataTransfer.files[0].name; }
+  });
+  input.addEventListener('change', () => {
+    if (input.files.length) { onPick(input.files[0]); fname.textContent = input.files[0].name; }
+  });
+}
+wireDropzone('dropzoneCoa', 'fileInputCoa', 'fnameCoa', (f) => coaFile = f);
+wireDropzone('dropzoneOther', 'fileInputOther', 'fnameOther', (f) => otherFile = f);
+
+const statusEl = document.getElementById('status');
+const statusText = document.getElementById('statusText');
+const resultCard = document.getElementById('resultCard');
+const resultBody = document.getElementById('resultBody');
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function setBusy(busy, text) {
+  document.getElementById('compareBtn').disabled = busy;
+  statusEl.style.display = busy ? 'flex' : 'none';
+  if (text) statusText.textContent = text;
+}
+function statusBadge(status) {
+  if (status === 'match') return '<span class="badge ok">Match</span>';
+  if (status === 'mismatch') return '<span class="badge err">Mismatch</span>';
+  return '<span class="badge warn">' + escapeHtml(status.replace(/_/g, ' ')) + '</span>';
+}
+
+document.getElementById('compareBtn').addEventListener('click', async () => {
+  if (!coaFile || !otherFile) { alert('Choose both files first.'); return; }
+  const form = new FormData();
+  form.append('coa_file', coaFile);
+  form.append('other_file', otherFile);
+  const apiKey = document.getElementById('apiKey').value.trim();
+  const model = document.getElementById('modelInput').value.trim();
+  if (apiKey) form.append('api_key', apiKey);
+  if (model) form.append('model', model);
+
+  resultCard.style.display = 'none';
+  setBusy(true, 'Reading both documents and comparing with OpenAI — this can take 10–30s…');
+
+  try {
+    const res = await fetch('/api/compare', { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Request failed');
+    renderResult(data);
+  } catch (e) {
+    resultCard.style.display = 'block';
+    resultBody.innerHTML = `<div class="error-box">${escapeHtml(e.message)}</div>`;
+  } finally {
+    setBusy(false);
+  }
+});
+
+function renderDocFields(doc) {
+  const rows = [
+    ['Material / Product Name', doc.material_name],
+    ['Recipe / Batch Number', doc.recipe_or_batch_number],
+    ['Manufacturing Date', doc.manufacturing_date],
+    ['Expiry Date', doc.expiry_date],
+    ['Origin', doc.origin + (doc.origin_evidence ? ` <span class="muted">(from: "${escapeHtml(doc.origin_evidence)}")</span>` : '')],
+  ];
+  let html = '<table class="plain">';
+  for (const [label, value] of rows) {
+    html += `<tr><td>${escapeHtml(label)}</td><td>${value ? (typeof value === 'string' ? escapeHtml(value) : value) : '<span class="muted">&mdash;</span>'}</td></tr>`;
+  }
+  html += '</table>';
+  if (doc.additional_info && doc.additional_info.length) {
+    html += '<details style="margin-top:10px;"><summary>Additional info (' + doc.additional_info.length + ')</summary><table class="plain" style="margin-top:8px;">';
+    for (const f of doc.additional_info) {
+      html += `<tr><td>${escapeHtml(f.label)}</td><td>${escapeHtml(f.value)}</td></tr>`;
+    }
+    html += '</table></details>';
+  }
+  return html;
+}
+
+function renderResult(data) {
+  resultCard.style.display = 'block';
+  const overallBadge = data.overall_status === 'match'
+    ? '<span class="badge ok">Everything matches</span>'
+    : '<span class="badge err">Discrepancy found</span>';
+
+  let comparisonRows = '';
+  for (const c of data.comparison) {
+    comparisonRows += `<tr>
+      <td>${escapeHtml(data.field_labels[c.field] || c.field)}</td>
+      <td>${statusBadge(c.status)}</td>
+      <td>${escapeHtml(c.explanation || '')}</td>
+    </tr>`;
+  }
+
+  resultBody.innerHTML = `
+    <div style="margin-bottom:14px;">${overallBadge}<p style="margin-top:8px;">${escapeHtml(data.summary)}</p></div>
+
+    <h3 style="font-size:14px; margin-bottom:8px;">Field-by-field comparison</h3>
+    <table class="plain" style="margin-bottom:20px;">
+      <thead><tr><th>Field</th><th>Status</th><th>Details</th></tr></thead>
+      <tbody>${comparisonRows}</tbody>
+    </table>
+
+    <div class="two-col">
+      <div>
+        <h3 style="font-size:14px;">COA</h3>
+        ${renderDocFields(data.coa)}
+      </div>
+      <div>
+        <h3 style="font-size:14px;">Other document</h3>
+        ${renderDocFields(data.other)}
+      </div>
+    </div>
+  `;
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+services:
+  coa-filler:
+    build: .
+    container_name: coa-filler
+    ports:
+      - "8420:8420"
+    env_file:
+      - .env
+    volumes:
+      # Bind-mount so you can add/edit templates, forms, and customers, and
+      # grab generated files from the host without rebuilding the image.
+      - ./templates:/app/templates
+      - ./generated:/app/generated
+      - ./data:/app/data
+      - ./forms:/app/forms
+    restart: unless-stopped

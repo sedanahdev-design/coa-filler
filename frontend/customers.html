@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Customers</title>
+<link rel="stylesheet" href="shared.css" />
+<style>
+  .customer-row { border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 10px; display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+  .customer-row pre { white-space: pre-wrap; font-family: inherit; margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+  .customer-row .name { font-weight: 700; }
+  .row-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  textarea { min-height: 90px; resize: vertical; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <nav class="navbar">
+      <a href="index.html">PDF &rarr; Word</a>
+      <a href="compare.html">Compare COA</a>
+      <a href="customers.html" class="active">Customers</a>
+      <a href="forms.html">Document Forms</a>
+    </nav>
+    <h1>Customers</h1>
+    <p>These are the buyer/consignee blocks used to auto-fill the document forms. Edit freely, or add new ones.</p>
+  </header>
+
+  <div class="card">
+    <h2>Add a customer</h2>
+    <div class="field">
+      <label>Display name</label>
+      <input type="text" id="newName" placeholder="e.g. MEDICO" />
+    </div>
+    <div class="field">
+      <label>Full address block (exactly as it should appear in documents)</label>
+      <textarea id="newFullText" placeholder="MEDICO&#10;PO.BOX:384&#10;HOMS, SYRIA"></textarea>
+    </div>
+    <button class="primary" id="addBtn">Add customer</button>
+  </div>
+
+  <div class="card">
+    <h2>Customer list (<span id="count">0</span>)</h2>
+    <div class="field">
+      <input type="text" id="searchBox" placeholder="Search by name…" />
+    </div>
+    <div id="list"></div>
+  </div>
+</div>
+
+<script>
+let customers = [];
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function loadCustomers() {
+  const res = await fetch('/api/customers');
+  customers = await res.json();
+  render();
+}
+
+function render() {
+  const q = document.getElementById('searchBox').value.trim().toLowerCase();
+  const filtered = q ? customers.filter(c => c.name.toLowerCase().includes(q)) : customers;
+  document.getElementById('count').textContent = customers.length;
+  const list = document.getElementById('list');
+  if (!filtered.length) {
+    list.innerHTML = '<p class="muted">No customers found.</p>';
+    return;
+  }
+  list.innerHTML = filtered.map(c => `
+    <div class="customer-row" data-id="${escapeHtml(c.id)}">
+      <div style="flex:1;">
+        <div class="name" contenteditable="false" data-field="name">${escapeHtml(c.name)}</div>
+        <pre contenteditable="false" data-field="full_text">${escapeHtml(c.full_text)}</pre>
+      </div>
+      <div class="row-actions">
+        <button class="secondary" data-action="edit">Edit</button>
+        <button class="danger" data-action="delete">Delete</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+document.getElementById('searchBox').addEventListener('input', render);
+
+document.getElementById('addBtn').addEventListener('click', async () => {
+  const name = document.getElementById('newName').value.trim();
+  const full_text = document.getElementById('newFullText').value.trim();
+  if (!name) { alert('Name is required.'); return; }
+  const res = await fetch('/api/customers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, full_text }),
+  });
+  if (!res.ok) { alert('Failed to add customer.'); return; }
+  document.getElementById('newName').value = '';
+  document.getElementById('newFullText').value = '';
+  await loadCustomers();
+});
+
+document.getElementById('list').addEventListener('click', async (e) => {
+  const row = e.target.closest('.customer-row');
+  if (!row) return;
+  const id = row.dataset.id;
+  const action = e.target.dataset.action;
+  if (!action) return;
+
+  if (action === 'delete') {
+    if (!confirm('Delete this customer?')) return;
+    await fetch(`/api/customers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    await loadCustomers();
+    return;
+  }
+
+  if (action === 'edit') {
+    const nameEl = row.querySelector('[data-field="name"]');
+    const textEl = row.querySelector('[data-field="full_text"]');
+    const editing = nameEl.contentEditable === 'true';
+    if (!editing) {
+      nameEl.contentEditable = 'true';
+      textEl.contentEditable = 'true';
+      nameEl.style.outline = '1px solid var(--accent)';
+      textEl.style.outline = '1px solid var(--accent)';
+      e.target.textContent = 'Save';
+    } else {
+      const name = nameEl.textContent.trim();
+      const full_text = textEl.textContent.trim();
+      const res = await fetch(`/api/customers/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, full_text }),
+      });
+      if (!res.ok) { alert('Failed to save.'); return; }
+      await loadCustomers();
+    }
+  }
+});
+
+loadCustomers();
+</script>
+</body>
+</html>
