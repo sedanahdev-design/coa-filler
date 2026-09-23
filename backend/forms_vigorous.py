@@ -28,6 +28,7 @@ from typing import Dict, List
 import docx
 
 from forms_docx_utils import (
+    clone_item_with_sublines_for_items,
     clone_paragraph_for_items,
     clone_row_for_items,
     fill_multiline_block,
@@ -54,7 +55,9 @@ def _flatten_batches(items: List[dict]) -> List[dict]:
     still gets rendered."""
     flat = []
     for item in items:
-        batches = item.get("batches") or [{"batch_no": "", "manufacturing_date": "", "expiry_date": ""}]
+        batches = item.get("batches") or [
+            {"batch_no": "", "manufacturing_date": "", "expiry_date": "", "retest_date": ""}
+        ]
         for b in batches:
             flat.append({**b, "material_name": item.get("material_name", "")})
     return flat
@@ -100,20 +103,41 @@ def _fill_invoice(path: Path, out_path: Path, customer: dict, shipment) -> None:
             f"{'':<28}{currency} {_fmt_money(total)}"
         )
 
-    clone_paragraph_for_items(paras[9], items, render_item_line)
-
-    # Batch/Mfg/Exp line (paragraph 11) cloned once per batch, flattened across
-    # all items (a material is often split across several batch numbers).
-    flat_batches = _flatten_batches(items)
-
-    def render_batch_line(batch: dict) -> str:
+    # Batch/Mfg/Exp line (paragraph 11): one per batch of THAT item (a
+    # material is often split across several batch numbers). Each item's
+    # batch line(s) are rendered directly under that item's own line, the
+    # same way the supplier invoice lays them out -- previously all item
+    # lines were cloned first and every batch was flattened together at the
+    # end, so batches no longer sat under the item they belong to.
+    def render_batch_line(batch: dict, item: dict = None) -> str:
+        # Prefer a genuine expiry date; a lot of real CoAs (reference
+        # standards, some bulk APIs) state only a Retest/Re-qualification
+        # date instead of a hard expiry -- confirmed real gap: with no
+        # fallback here, this line's date came out blank for every one of
+        # those, which looked like the expiry date was "never" being
+        # picked up at all. Falling back to the retest date (relabeled)
+        # means the line always shows *some* usable date when the source
+        # states one, rather than silently leaving it empty.
+        expiry = batch.get("expiry_date", "")
+        if expiry:
+            date_label, date_value = "Exp. Date:", expiry
+        else:
+            retest = batch.get("retest_date", "")
+            date_label, date_value = ("Retest Date:", retest) if retest else ("Exp. Date:", "")
         return (
             f"                 Batch NO: {batch.get('batch_no', '')}"
             f"             Mfg. Date: {batch.get('manufacturing_date', '')}"
-            f"                 Exp. Date: {batch.get('expiry_date', '')}"
+            f"                 {date_label} {date_value}"
         )
 
-    clone_paragraph_for_items(paras[11], flat_batches, render_batch_line)
+    clone_item_with_sublines_for_items(
+        paras[9],
+        paras[11],
+        items,
+        render_item_line,
+        lambda item: item.get("batches") or [],
+        render_batch_line,
+    )
 
     grand_total = sum(_item_total(i) for i in items)
 

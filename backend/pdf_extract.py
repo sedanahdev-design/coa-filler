@@ -18,7 +18,7 @@ import base64
 import io
 import dataclasses
 import unicodedata
-from typing import List
+from typing import List, Optional, Tuple
 
 import pdfplumber
 import pypdfium2 as pdfium
@@ -70,6 +70,10 @@ class EmbeddedImage:
     height: int
     data: bytes  # raw image bytes (as stored in the PDF, decoded to a standard format)
     format: str  # "png" or "jpeg"
+    # Where the image is drawn on its page, as fractions of page width/height
+    # with a TOP-left origin ([x0, y0, x1, y1], same convention as the AI's
+    # signature bbox). None when the placement couldn't be determined.
+    bbox: Optional[Tuple[float, float, float, float]] = None
 
     @property
     def aspect_ratio(self) -> float:
@@ -141,7 +145,70 @@ def render_pages(pdf_path: str, dpi: int = 200, max_pages: int = 5) -> List[Page
     return renders
 
 
+def _extract_embedded_images_pdfium(pdf_path: str, min_side: int, max_count: int) -> List[EmbeddedImage]:
+    """Embedded images WITH their on-page placement (needed to match a
+    stamp/signature the AI located to the clean image object behind it)."""
+    import pypdfium2.raw as pdfium_c
+
+    results: List[EmbeddedImage] = []
+    pdf = pdfium.PdfDocument(pdf_path)
+    try:
+        for page_index in range(len(pdf)):
+            page = pdf[page_index]
+            page_w, page_h = page.get_size()
+            for obj in page.get_objects(filter=[pdfium_c.FPDF_PAGEOBJ_IMAGE]):
+                try:
+                    get_bounds = getattr(obj, "get_bounds", None) or getattr(obj, "get_pos")
+                    left, bottom, right, top = get_bounds()
+                    try:
+                        # render=True applies soft masks / colour space / flips
+                        pil_image = obj.get_bitmap(render=True).to_pil()
+                    except Exception:
+                        pil_image = obj.get_bitmap(render=False).to_pil()
+                except Exception:
+                    continue
+                w, h = pil_image.size
+                if w < min_side or h < min_side:
+                    continue
+                if pil_image.mode not in ("RGB", "RGBA", "L"):
+                    pil_image = pil_image.convert("RGBA")
+                buf = io.BytesIO()
+                pil_image.save(buf, format="PNG")
+                bbox = None
+                if page_w and page_h:
+                    bbox = (
+                        max(0.0, min(1.0, left / page_w)),
+                        max(0.0, min(1.0, 1.0 - top / page_h)),
+                        max(0.0, min(1.0, right / page_w)),
+                        max(0.0, min(1.0, 1.0 - bottom / page_h)),
+                    )
+                results.append(
+                    EmbeddedImage(
+                        index=len(results),
+                        page_number=page_index + 1,
+                        width=w,
+                        height=h,
+                        data=buf.getvalue(),
+                        format="png",
+                        bbox=bbox,
+                    )
+                )
+                if len(results) >= max_count:
+                    return results
+    finally:
+        pdf.close()
+    return results
+
+
 def extract_embedded_images(pdf_path: str, min_side: int = 25, max_count: int = 40) -> List[EmbeddedImage]:
+    try:
+        return _extract_embedded_images_pdfium(pdf_path, min_side, max_count)
+    except Exception:
+        pass  # fall back to pypdf below (no placement info)
+    return _extract_embedded_images_pypdf(pdf_path, min_side, max_count)
+
+
+def _extract_embedded_images_pypdf(pdf_path: str, min_side: int = 25, max_count: int = 40) -> List[EmbeddedImage]:
     """
     Pull embedded raster images out of the PDF using pypdf. These are candidates for
     logos / signatures / stamps. Very small images (icons/bullets) are skipped.

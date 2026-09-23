@@ -195,3 +195,83 @@ def clone_row_for_items(row: _Row, items: list, render_fn: Callable) -> List[_Ro
         apply(new_row, item)
         result.append(new_row)
     return result
+
+
+def clone_item_with_sublines_for_items(
+    item_paragraph: Paragraph,
+    sub_paragraph: Paragraph,
+    items: list,
+    render_item: Callable,
+    get_subitems: Callable,
+    render_sub: Callable,
+) -> List[List[Paragraph]]:
+    """Render a list of items where each item has its OWN sub-lines (e.g. an
+    invoice item line followed by that item's batch line(s)), keeping them
+    interleaved in source-document order:
+
+        item1 line / (spacer) / item1 batch a / item1 batch b
+        (spacer)
+        item2 line / (spacer) / item2 batch a ...
+
+    `item_paragraph` and `sub_paragraph` are the template's single item line
+    and single sub-line; any paragraphs sitting between them in the template
+    (typically one blank spacer) are reproduced inside every group, and a
+    copy of them also separates consecutive groups. Clones are taken from
+    pristine (pre-fill) copies so formatting is identical to the template.
+    get_subitems(item) returns that item's sub-item list; an empty list still
+    renders one sub-line from an empty dict so the layout stays intact.
+    Returns one list of paragraphs per item."""
+    parent = item_paragraph._parent
+    # Paragraph XML elements strictly between item and sub line in the template
+    between = []
+    nxt = item_paragraph._p.getnext()
+    while nxt is not None and nxt is not sub_paragraph._p:
+        between.append(nxt)
+        nxt = nxt.getnext()
+    if nxt is None:  # sub line doesn't follow item line -- treat as adjacent
+        between = []
+
+    item_tpl = copy.deepcopy(item_paragraph._p)
+    sub_tpl = copy.deepcopy(sub_paragraph._p)
+    between_tpl = [copy.deepcopy(e) for e in between]
+
+    if not items:
+        set_paragraph_full_text(item_paragraph, "")
+        set_paragraph_full_text(sub_paragraph, "")
+        return [[item_paragraph, sub_paragraph]]
+
+    groups: List[List[Paragraph]] = []
+    anchor = sub_paragraph._p  # insertion point: after the last element written
+
+    def _insert(tpl):
+        nonlocal anchor
+        el = copy.deepcopy(tpl)
+        anchor.addnext(el)
+        anchor = el
+        return el
+
+    for idx, item in enumerate(items):
+        subs = list(get_subitems(item) or []) or [{}]
+        group: List[Paragraph] = []
+        if idx == 0:
+            # Reuse the template's own paragraphs for the first group
+            set_paragraph_full_text(item_paragraph, render_item(item))
+            group.append(item_paragraph)
+            set_paragraph_full_text(sub_paragraph, render_sub(subs[0], item))
+            group.append(sub_paragraph)
+            remaining = subs[1:]
+        else:
+            for tpl in between_tpl:  # separator between groups
+                _insert(tpl)
+            p = Paragraph(_insert(item_tpl), parent)
+            set_paragraph_full_text(p, render_item(item))
+            group.append(p)
+            for tpl in between_tpl:
+                _insert(tpl)
+            remaining = subs
+        for sub in remaining:
+            p = Paragraph(_insert(sub_tpl), parent)
+            set_paragraph_full_text(p, render_sub(sub, item))
+            group.append(p)
+        groups.append(group)
+    return groups

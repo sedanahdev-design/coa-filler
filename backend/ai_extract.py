@@ -36,7 +36,13 @@ JSON_SCHEMA = {
                     "COA No, AR No, Mfg Date, Exp Date, Date of Sampling, Test Completion "
                     "Date, Quantity, Manufacturer, Remarks, Storage Condition, etc. Use the "
                     "label text exactly as it appears on the document (without the trailing "
-                    "colon)."
+                    "colon). This also applies to simpler 'reference standard' style CoAs "
+                    "laid out as one label/value pair per row (rather than a multi-column "
+                    "field grid) -- extract every one of those rows too, e.g. Lot#, Original "
+                    "Lot#, Qualification Date, Re-qualification Date, Formula Weight, CAS, "
+                    "COA#, Version#, Storage condition, Usage, use method. Don't skip a row "
+                    "just because it isn't one of the more common field names above -- if it's "
+                    "a labeled value in the header/metadata area, report it."
                 ),
                 "items": {
                     "type": "object",
@@ -50,14 +56,46 @@ JSON_SCHEMA = {
             },
             "test_results": {
                 "type": "array",
-                "description": "Every row of the test-results / specifications table.",
+                "description": (
+                    "Every row of the test-results / specifications table. When a category "
+                    "groups several named sub-items under one heading (e.g. 'Related "
+                    "Substances' listing several named impurities, 'Residual Solvents' "
+                    "listing several named solvents, 'Identification' tested by more than "
+                    "one method such as HPLC and IR), list EVERY sub-item as its own separate "
+                    "entry -- never summarize, collapse, or skip any of them, even if there "
+                    "are many. If such a group's sub-items continue onto a later page image, "
+                    "include all of them as one continuous set of entries in the order they "
+                    "appear -- do not stop just because the page changed. Some CoAs (especially "
+                    "simpler reference-standard certificates) have no multi-row specifications "
+                    "table at all -- just one or two individual quality attributes stated "
+                    "inline in the header area (e.g. a single row reading 'Assay (By HPLC, "
+                    "%w/w): 99.3% (on dried basis)'). Still report each of those as its own "
+                    "test_results entry (parameter='Assay', result='99.3% (on dried basis)') "
+                    "rather than leaving test_results empty just because there's no table -- "
+                    "any explicit test/assay/purity-type result belongs here even outside a "
+                    "table."
+                ),
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
-                        "parameter": {"type": "string", "description": "Test / parameter name, e.g. 'Appearance', 'Assay', 'Identification by IR'."},
+                        "parameter": {
+                            "type": "string",
+                            "description": (
+                                "Test / parameter name, e.g. 'Appearance', 'Assay'. For a "
+                                "named sub-item within a grouped category, include BOTH the "
+                                "group's own heading and the sub-item's specific name, e.g. "
+                                "'Related Substances ZP061-S010 (Isomer)', 'Residual Solvents "
+                                "Ethanol', 'Identification HPLC'. Note that an Identification "
+                                "test performed 'by HPLC' (or by IR, UV, etc.) is a DIFFERENT "
+                                "test from 'Assay' even when Assay is also performed by HPLC -- "
+                                "they test different things and must be reported as separate, "
+                                "unrelated entries, never merged or cross-substituted just "
+                                "because they share an analytical method name."
+                            ),
+                        },
                         "specification": {"type": "string", "description": "The specification/limit text, if shown. Empty string if not present in the source."},
-                        "result": {"type": "string", "description": "The observed/reported result value for this parameter."},
+                        "result": {"type": "string", "description": "The observed/reported result value for this parameter, transcribed exactly as shown (e.g. keep a 'RRT2.23: 0.05%' style result exactly as printed, don't simplify it to just the percentage)."},
                     },
                     "required": ["parameter", "specification", "result"],
                 },
@@ -91,13 +129,37 @@ PDF. Extract ALL data from it precisely into the given JSON schema:
 
 - header_fields: every labeled field in the document header/footer (product name, batch
   number, dates, quantities, report numbers, remarks, storage conditions, etc). Do not
-  invent fields that aren't present. Do not include the test-results table here.
+  invent fields that aren't present. Do not include the test-results table here. Some CoAs
+  -- especially simpler "reference standard" certificates -- lay out their header as a
+  single column of one label/value pair per row rather than a multi-column field grid (e.g.
+  Lot#, Original Lot#, Qualification Date, Re-qualification Date, Formula Weight, CAS,
+  COA#, Version#, Storage condition, Usage, use method). Extract every one of those rows
+  too, the same as any other header field -- don't skip a row just because its label isn't
+  one of the more common ones.
 - test_results: every row of the specifications/test-results table, in the same order as
-  the source document. Preserve numbers/units exactly as written.
+  the source document. Preserve numbers/units exactly as written. A category that groups
+  several named sub-items under one heading (Related Substances, Residual Solvents, an
+  Identification tested by several methods, an Amino acids ratio broken down per amino
+  acid, Microbial tests, etc.) must have EVERY sub-item listed as its own entry -- go
+  through the whole list slowly and check you haven't skipped or merged any, especially
+  when the list is long or continues onto a following page image (residual-solvent lists in
+  particular are often split across a page break -- keep listing every solvent from both
+  pages as one continuous set, in order). Two DIFFERENT tests that happen to share an
+  analytical method name (e.g. an Identification done "by HPLC" vs. the separate "Assay"
+  test, even though Assay is also run by HPLC) are NOT the same thing -- report each under
+  its own real test name, never combined or substituted for the other. If the document has
+  no multi-row specifications table at all -- just one or two quality attributes stated
+  inline (e.g. a reference-standard CoA's single "Assay (By HPLC, %w/w): 99.3%" line) --
+  still report each as its own test_results entry rather than leaving test_results empty.
 - signature: if a handwritten signature, stamp, or company chop/seal is visible anywhere in
   the document, report which page and a normalized bounding box tightly around just that
   mark (not the whole signature block/table cell -- just the ink/stamp itself). If none is
   visible, set present to false and bbox to [0,0,0,0].
+
+Some CoAs show every label and value in two languages (e.g. English then Chinese) stacked in
+the same cell -- that is still ONE field/row, not two; read both lines to confirm they agree,
+then report it once. Do not let the extra lines cause you to lose track of, skip, or
+duplicate a row.
 
 Be exhaustive and accurate. This data will be used to fill a regulatory document, so
 transcribe values exactly as printed (do not normalize units or reformat dates)."""
@@ -156,7 +218,11 @@ def extract_coa_data(extraction: PdfExtraction, api_key: str, model: str = DEFAU
     """Call OpenAI to extract structured CoA data. Raises on API/parse failure."""
     from openai import OpenAI
 
-    client = OpenAI(api_key=api_key)
+    # Explicit timeout so a slow/stuck vision call fails with a clear,
+    # catchable error within a bounded time instead of hanging until some
+    # upstream proxy or load balancer gives up first (which tends to produce
+    # an opaque "Bad Gateway" with no useful detail).
+    client = OpenAI(api_key=api_key, timeout=150.0, max_retries=1)
     messages = _build_messages(extraction)
 
     response = client.chat.completions.create(
@@ -175,6 +241,58 @@ def extract_coa_data(extraction: PdfExtraction, api_key: str, model: str = DEFAU
     )
 
 
+def _whiten_to_transparent(png_bytes: bytes, threshold: int = 235) -> bytes:
+    """Make the near-white background of a stamp/signature transparent so it
+    doesn't blank out template text it's placed over."""
+    img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+    px = img.getdata()
+    img.putdata([
+        (r, g, b, 0) if (r >= threshold and g >= threshold and b >= threshold) else (r, g, b, a)
+        for r, g, b, a in px
+    ])
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _embedded_image_for_bbox(extraction: PdfExtraction, page_number: int, bbox) -> Optional[bytes]:
+    """The embedded image on `page_number` that best matches the AI's
+    signature bbox, as clean PNG bytes -- or None.
+
+    Match = the image's placement overlaps the AI box (a good share of the
+    smaller of the two), or failing that its centre is very close. Skips
+    full-page scans (the page itself is one big image) and images whose
+    placement is unknown."""
+    ax0, ay0, ax1, ay1 = bbox
+    a_area = (ax1 - ax0) * (ay1 - ay0)
+    acx, acy = (ax0 + ax1) / 2, (ay0 + ay1) / 2
+    best, best_score = None, 0.0
+    for im in getattr(extraction, "images", None) or []:
+        if im.page_number != page_number or not getattr(im, "bbox", None):
+            continue
+        bx0, by0, bx1, by1 = im.bbox
+        b_area = (bx1 - bx0) * (by1 - by0)
+        if b_area <= 0 or b_area > 0.5:
+            continue  # scanned page / background, not a stamp
+        ix = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+        iy = max(0.0, min(ay1, by1) - max(ay0, by0))
+        overlap = ix * iy / min(a_area, b_area)
+        if overlap < 0.3:
+            bcx, bcy = (bx0 + bx1) / 2, (by0 + by1) / 2
+            dist = ((acx - bcx) ** 2 + (acy - bcy) ** 2) ** 0.5
+            if dist > 0.08:
+                continue
+            overlap = 0.3 - dist  # weak match, ranked below any real overlap
+        if overlap > best_score:
+            best, best_score = im, overlap
+    if best is None:
+        return None
+    try:
+        return _whiten_to_transparent(best.data)
+    except Exception:
+        return best.data
+
+
 def crop_signature(extraction: PdfExtraction, signature: dict) -> Optional[bytes]:
     """
     Given the signature dict returned by extract_coa_data, crop the corresponding
@@ -188,15 +306,25 @@ def crop_signature(extraction: PdfExtraction, signature: dict) -> Optional[bytes
     if len(bbox) != 4 or page_number <= 0:
         return None
 
-    page = next((p for p in extraction.pages if p.page_number == page_number), None)
-    if page is None:
-        return None
-
     x0, y0, x1, y1 = bbox
     # Clamp + sanity check
     x0, x1 = sorted((max(0.0, min(1.0, x0)), max(0.0, min(1.0, x1))))
     y0, y1 = sorted((max(0.0, min(1.0, y0)), max(0.0, min(1.0, y1))))
     if (x1 - x0) < 0.005 or (y1 - y0) < 0.005:
+        return None
+
+    # Prefer the PDF's own embedded stamp/signature image when there is one
+    # where the AI pointed. Cropping the rendered page instead picks up any
+    # text printed over the stamp and depends on the AI's rough box -- real
+    # case (Shandong Fangxing COA): the red chop sits under "Analyst",
+    # "FINAL BATCH DISPOSITION" and "Approved", and the page crop came out as
+    # a clipped corner of the stamp with that text across it.
+    embedded = _embedded_image_for_bbox(extraction, page_number, (x0, y0, x1, y1))
+    if embedded is not None:
+        return embedded
+
+    page = next((p for p in extraction.pages if p.page_number == page_number), None)
+    if page is None:
         return None
 
     # Add a small margin so we don't clip the ink, then re-clamp.

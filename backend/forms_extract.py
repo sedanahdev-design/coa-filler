@@ -31,16 +31,27 @@ BATCH_SCHEMA = {
             "description": (
                 "The batch's EXPIRY date only -- look for a label like 'Exp Date', "
                 "'Expiry Date', 'EXP', or 'Use By'. This is a DIFFERENT field from a "
-                "'Retest Date' / 'Re-test Date' (sometimes shown on a COA instead of, or "
-                "alongside, an expiry date) -- do not substitute one for the other. "
-                "Prefer an explicit expiry date on the supplier/invoice/packing "
-                "documents if one is shown there. If no genuine expiry date is stated "
-                "anywhere for this batch (only a retest date, or nothing at all), leave "
-                "this as an empty string rather than using the retest date as a stand-in."
+                "'Retest Date' / 'Re-test Date' / 'Re-qualification Date' (sometimes shown "
+                "on a COA instead of, or alongside, an expiry date) -- do not substitute "
+                "one for the other; report that under retest_date below instead. Prefer an "
+                "explicit expiry date on the supplier/invoice/packing documents if one is "
+                "shown there. If no genuine expiry date is stated anywhere for this batch "
+                "(only a retest date, or nothing at all), leave this as an empty string."
+            ),
+        },
+        "retest_date": {
+            "type": "string",
+            "description": (
+                "The batch's Retest Date / Re-test Date / Re-qualification Date, if the "
+                "source states one -- common on reference-standard or bulk-API CoAs that "
+                "don't state a hard expiry at all, just a future date by which the "
+                "material must be re-tested/re-qualified to confirm it's still usable. "
+                "Leave as an empty string if the source states a genuine expiry_date "
+                "instead (don't fill both), or if neither is present."
             ),
         },
     },
-    "required": ["batch_no", "manufacturing_date", "expiry_date"],
+    "required": ["batch_no", "manufacturing_date", "expiry_date", "retest_date"],
 }
 
 ITEM_SCHEMA = {
@@ -48,7 +59,15 @@ ITEM_SCHEMA = {
     "additionalProperties": False,
     "properties": {
         "material_name": {"type": "string"},
-        "manufacturer": {"type": "string", "description": "Manufacturer name, taken from the COA for this material."},
+        "manufacturer": {
+            "type": "string",
+            "description": (
+                "Manufacturer name, taken from the COA for this material. If no COA was "
+                "provided for this material, use the manufacturer stated for it on the "
+                "supplier documents; if none is stated anywhere, use an empty string -- "
+                "never drop the item just because its manufacturer is unknown."
+            ),
+        },
         "quantity_text": {"type": "string", "description": "TOTAL quantity across all this item's batches, exactly as written, e.g. '100 G' or '2,500 KG'."},
         "quantity_value": {"type": "number", "description": "Best-effort numeric TOTAL quantity (same unit as unit_price is quoted per), 0 if unknown."},
         "unit": {"type": "string", "description": "Unit the quantity/price are in, e.g. 'G', 'KG'."},
@@ -107,7 +126,19 @@ JSON_SCHEMA = {
             "port_of_final_destination": {"type": "string", "description": "Port of final destination, empty string if not stated (may be the same as port_of_discharge)."},
             "country_of_final_destination": {"type": "string", "description": "Country the goods are ultimately headed to, empty string if not stated."},
             "carriage_by": {"type": "string", "description": "Mode/route of carriage if explicitly stated, e.g. 'SEA - ALEX', else empty string."},
-            "items": {"type": "array", "items": ITEM_SCHEMA},
+            "items": {
+                "type": "array",
+                "items": ITEM_SCHEMA,
+                "description": (
+                    "One entry for EVERY distinct material/product line on the supplier "
+                    "invoice/packing list, in the same order they appear there. The number "
+                    "of entries must equal the number of material lines on the supplier "
+                    "documents, regardless of how many COA files were provided -- a "
+                    "material with no matching COA is still listed (fill what the supplier "
+                    "documents state, leave the rest empty/0). Only fall back to one item "
+                    "per COA if no supplier document lists any materials at all."
+                ),
+            },
         },
         "required": [
             "invoice_no", "invoice_date", "origin", "origin_evidence", "total_package_description",
@@ -134,6 +165,16 @@ Produce ONE shipment record with one line item per material. For each material:
   item's "batches" array, in the order they appear. If the source only mentions one
   batch for a material, "batches" still has exactly one entry.
 - Match each COA to the correct line item by material name.
+
+COMPLETENESS IS CRITICAL: the supplier invoice/packing list is the authoritative list of
+what is in this shipment. Before answering, count the material/product lines on the
+supplier documents and make sure "items" has exactly that many entries, in the same order.
+Do NOT drop, merge, or skip a material because no COA was uploaded for it, because its
+manufacturer/batch details are missing, or because it looks similar to another line. A
+material without a matching COA is still listed: take its name, quantity, price, packaging,
+weights, and any batch/dates from the supplier documents, and leave only the fields that
+truly aren't stated anywhere empty (or 0). Two lines are the same item only if they are the
+same material; different materials are always separate items.
 
 Also extract shipment-level invoice_no and invoice_date, origin (country of origin --
 look for phrasing like "Made in X", "Product of X", "Origin: X", or a manufacturer's/COA's
@@ -193,7 +234,7 @@ class ShipmentData:
 def extract_shipment_data(coa_docs: List[DocContent], supplier_docs: List[DocContent], api_key: str, model: str = DEFAULT_MODEL) -> ShipmentData:
     from openai import OpenAI
 
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, timeout=150.0, max_retries=1)
 
     content = []
     for i, d in enumerate(coa_docs, 1):

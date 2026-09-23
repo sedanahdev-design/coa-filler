@@ -13,12 +13,13 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import traceback
 import uuid
 from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -42,6 +43,31 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 GENERATED_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="CoA Template Filler")
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    # Belt-and-suspenders: every /api/* route below already wraps its own
+    # risky calls in try/except -> HTTPException, which FastAPI turns into a
+    # clean JSON body on its own. But that only covers exceptions the code
+    # anticipated. Anything that slips through uncaught (a bug in a code path
+    # nobody wrapped, a crash while building the final response dict, etc.)
+    # would otherwise hit Starlette's default handler, which -- depending on
+    # the exact server/proxy setup -- can render an HTML error page instead
+    # of JSON. The frontend always does `await res.json()`, so an HTML body
+    # there fails with a confusing "Unexpected token '<' ... is not valid
+    # JSON" instead of ever showing what actually went wrong. Catch
+    # everything at this top level and always hand back JSON instead.
+    print("=" * 70)
+    print(f"[coa-filler] UNHANDLED EXCEPTION on {request.method} {request.url.path}")
+    traceback.print_exc()
+    print("=" * 70)
+    if request.url.path.startswith("/api/"):
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Unexpected server error: {exc}"},
+        )
+    raise exc
 
 PRESERVE_LAYOUT_ID = "__preserve_layout__"
 
@@ -171,7 +197,15 @@ async def generate(
         try:
             result = ai_extract.extract_coa_data(extraction, api_key=key, model=model_name)
         except Exception as e:
-            raise HTTPException(502, f"OpenAI extraction failed: {e}")
+            print("=" * 70)
+            print(f"[coa-filler] OpenAI extraction call failed (template={template_id}, model={model_name})")
+            traceback.print_exc()
+            print("=" * 70)
+            # Use 500, not 502: some reverse proxies/hosting platforms intercept
+            # 502 responses and replace the body with their own generic HTML
+            # error page, which makes the browser see "<!DOCTYPE ..." instead of
+            # this JSON error -- 500 is far less likely to be swallowed that way.
+            raise HTTPException(500, f"OpenAI extraction failed: {e}")
 
         # Always log what the model actually returned -- visible in the terminal /
         # `docker compose logs` even if the browser UI is confusing. This is the
@@ -266,7 +300,11 @@ async def compare_endpoint(
         try:
             result = compare.compare_documents(coa_doc, other_doc, api_key=key, model=model_name)
         except Exception as e:
-            raise HTTPException(502, f"OpenAI comparison failed: {e}")
+            print("=" * 70)
+            print(f"[coa-filler] OpenAI comparison call failed (model={model_name})")
+            traceback.print_exc()
+            print("=" * 70)
+            raise HTTPException(500, f"OpenAI comparison failed: {e}")
 
         print("=" * 70)
         print(f"[coa-filler:compare] model={model_name}")
@@ -352,7 +390,11 @@ async def generate_form(
         try:
             shipment = forms_extract.extract_shipment_data(coa_docs, supplier_docs, api_key=key, model=model_name)
         except Exception as e:
-            raise HTTPException(502, f"OpenAI extraction failed: {e}")
+            print("=" * 70)
+            print(f"[coa-filler] OpenAI shipment-extraction call failed (model={model_name})")
+            traceback.print_exc()
+            print("=" * 70)
+            raise HTTPException(500, f"OpenAI extraction failed: {e}")
 
         print("=" * 70)
         print(f"[coa-filler:forms] form={form_id} customer={customer_id} model={model_name}")

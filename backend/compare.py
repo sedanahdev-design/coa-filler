@@ -148,7 +148,7 @@ class ComparisonResult:
 def compare_documents(coa_doc: DocContent, other_doc: DocContent, api_key: str, model: str = DEFAULT_MODEL) -> ComparisonResult:
     from openai import OpenAI
 
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, timeout=150.0, max_retries=1)
 
     content = []
     content.extend(_content_block(coa_doc, "COA"))
