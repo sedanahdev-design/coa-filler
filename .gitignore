@@ -11,6 +11,14 @@ __pycache__/
 # Generated output
 generated/*.docx
 
+# Local scratch / test / build output (not part of the app)
+Claude outputs/
+_ar_preview/
+_preview/
+_preview_ocr/
+_real_test/
+coa-filler/
+
 # OS / editor
 .DS_Store
 Thumbs.db
