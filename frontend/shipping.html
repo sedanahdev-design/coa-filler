@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Shipping Instructions</title>
+<link rel="stylesheet" href="shared.css" />
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <nav class="navbar">
+      <a href="index.html">PDF &rarr; Word</a>
+      <a href="compare.html">Compare COA</a>
+      <a href="customers.html">Customers</a>
+      <a href="forms.html">Document Forms</a>
+      <a href="shipping.html" class="active">Shipping Instructions</a>
+    </nav>
+    <h1>Shipping Instructions</h1>
+    <p>Upload the Purchase Order PDF. The fields it reads are shown so you can check them,
+      then the Shipping Instructions Excel sheet is filled &mdash; its own formulas
+      (Made in, China/India attestation, Air/Sea, Full/Neutral labels) keep working.</p>
+  </header>
+
+  <div class="card">
+    <h2>1. Purchase Order (PO)</h2>
+    <div class="dropzone" id="dropzonePo">
+      <div class="icon">&#128196;</div>
+      <div>Click or drag the PO PDF here</div>
+      <div class="fname" id="fnamePo"></div>
+    </div>
+    <input type="file" id="fileInputPo" accept=".pdf" style="display:none" />
+
+    <details class="field" style="margin-top:18px;">
+      <summary>Advanced: OpenAI API key / model override</summary>
+      <div style="margin-top:10px;">
+        <label>OpenAI API key</label>
+        <input type="password" id="apiKey" placeholder="Leave blank to use OPENAI_API_KEY from the server's .env" />
+        <label style="margin-top:12px;">Model</label>
+        <input type="text" id="modelInput" placeholder="gpt-4o (default)" />
+      </div>
+    </details>
+
+    <button class="primary" id="readBtn" style="margin-top:14px;">2. Read the PO</button>
+    <div class="status" id="status" style="display:none;">
+      <div class="spinner"></div>
+      <span id="statusText">Working&hellip;</span>
+    </div>
+  </div>
+
+  <div class="card" id="reviewCard" style="display:none;">
+    <h2>3. Check the values</h2>
+    <p class="muted" style="margin-top:-6px;">Straight from the PO &mdash; correct anything that looks wrong, then generate the sheet.</p>
+
+    <div class="field">
+      <label>Shipment</label>
+      <select id="f_shipment_mode">
+        <option value="Air">Air Shipment</option>
+        <option value="Sea">Sea Shipment</option>
+      </select>
+      <span class="muted" id="modeHint"></span>
+    </div>
+
+    <div class="field">
+      <label>Product <span class="muted">(name only &mdash; sheet cell B8)</span></label>
+      <input type="text" id="f_product" />
+    </div>
+
+    <div class="grid2">
+      <div class="field">
+        <label>Quantity</label>
+        <input type="number" id="f_quantity" step="any" />
+      </div>
+      <div class="field">
+        <label>Unit</label>
+        <input type="text" id="f_unit" placeholder="KG" />
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="field">
+        <label>Price per unit</label>
+        <input type="number" id="f_price_per_unit" step="any" />
+      </div>
+      <div class="field">
+        <label>Total from the PO</label>
+        <input type="number" id="f_total" step="any" />
+        <span class="muted" id="totalHint"></span>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Inco terms <span class="muted">(from the PO's Shipping terms)</span></label>
+      <input type="text" id="f_incoterms" placeholder="CIF Amman by Air" />
+    </div>
+
+    <div class="grid2">
+      <div class="field">
+        <label>Origin <span class="muted">(from the PO's Vendor)</span></label>
+        <input type="text" id="f_origin" placeholder="India" />
+        <span class="muted" id="originHint"></span>
+      </div>
+      <div class="field">
+        <label>Label type</label>
+        <select id="f_label_type">
+          <option value="full">full</option>
+          <option value="Neutral">Neutral</option>
+        </select>
+        <span class="muted" id="labelHint"></span>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Consignee &amp; Notify Parties</label>
+      <textarea id="f_consignee" rows="4"></textarea>
+    </div>
+
+    <div class="field">
+      <label>Specs / Special Requirements <span class="muted">(leave blank to keep the sheet's own wording)</span></label>
+      <textarea id="f_specs" rows="2"></textarea>
+      <span class="muted" id="descHint"></span>
+    </div>
+
+    <button class="primary" id="generateBtn" style="margin-top:6px;">4. Generate the Excel sheet</button>
+  </div>
+
+  <div class="card" id="resultCard" style="display:none;">
+    <h2>Result</h2>
+    <div id="resultBody"></div>
+  </div>
+</div>
+
+<style>
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:0 16px; }
+  @media (max-width: 620px) { .grid2 { grid-template-columns:1fr; } }
+  #reviewCard .muted { font-size:12px; display:block; margin-top:4px; }
+  #reviewCard label .muted { display:inline; margin:0; }
+</style>
+
+<script>
+let poFile = null;
+let lastPo = null;
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+(function wireDropzone() {
+  const zone = document.getElementById('dropzonePo');
+  const input = document.getElementById('fileInputPo');
+  const fname = document.getElementById('fnamePo');
+  const pick = (files) => { if (files && files.length) { poFile = files[0]; fname.textContent = poFile.name; } };
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('drag'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag'));
+  zone.addEventListener('drop', (e) => { e.preventDefault(); zone.classList.remove('drag'); pick(e.dataTransfer.files); });
+  input.addEventListener('change', () => pick(input.files));
+})();
+
+const statusEl = document.getElementById('status');
+const statusText = document.getElementById('statusText');
+const reviewCard = document.getElementById('reviewCard');
+const resultCard = document.getElementById('resultCard');
+const resultBody = document.getElementById('resultBody');
+
+function setBusy(busy, text) {
+  document.getElementById('readBtn').disabled = busy;
+  statusEl.style.display = busy ? 'flex' : 'none';
+  if (text) statusText.textContent = text;
+}
+
+const FIELDS = ['shipment_mode','product','quantity','unit','price_per_unit','total','incoterms','origin','consignee','label_type','specs'];
+
+function setValues(values) {
+  for (const key of FIELDS) {
+    const el = document.getElementById('f_' + key);
+    if (el && values[key] !== undefined && values[key] !== null) el.value = values[key];
+  }
+  updateHints();
+}
+
+function getValues() {
+  const out = {};
+  for (const key of FIELDS) {
+    const el = document.getElementById('f_' + key);
+    if (!el) continue;
+    out[key] = (el.type === 'number') ? (parseFloat(el.value) || 0) : el.value;
+  }
+  return out;
+}
+
+function updateHints() {
+  const v = getValues();
+  const air = v.shipment_mode === 'Air';
+  document.getElementById('modeHint').textContent = air
+    ? 'Sheet shows "AWB:" and the "don\'t split the shipment" note.'
+    : 'Sheet shows "BL Telex Release:" and the "not Maersk / Hapag Lloyd" note.';
+  const china = (v.origin || '').trim().toLowerCase() === 'china';
+  document.getElementById('originHint').textContent = china
+    ? '"Made in" follows this. Document rows: attested from CCPIT.'
+    : '"Made in" follows this. Document rows: attested from Chamber of Commerce.';
+  document.getElementById('labelHint').textContent = (v.label_type === 'Neutral')
+    ? 'Adds the "no inner labels / no manufacturer name" note, and the word under Samples & WS becomes Neutral.'
+    : 'The word under Samples & Working Standard stays "full".';
+  const computed = (v.quantity || 0) * (v.price_per_unit || 0);
+  const mismatch = v.total && Math.abs(v.total - computed) > 0.01;
+  document.getElementById('totalHint').textContent = mismatch
+    ? `Doesn't match quantity x price (${computed.toLocaleString()}) — the PO's number will be written in instead of the formula.`
+    : `Sheet keeps its =Quantity x Price formula (${computed.toLocaleString()}).`;
+  document.getElementById('descHint').textContent = lastPo && lastPo.description_full
+    ? 'PO description: ' + lastPo.description_full
+    : '';
+}
+FIELDS.forEach(k => {
+  const el = document.getElementById('f_' + k);
+  if (el) el.addEventListener('input', updateHints);
+  if (el && el.tagName === 'SELECT') el.addEventListener('change', updateHints);
+});
+
+document.getElementById('readBtn').addEventListener('click', async () => {
+  if (!poFile) { alert('Upload the Purchase Order PDF first.'); return; }
+  const form = new FormData();
+  form.append('po_file', poFile);
+  const apiKey = document.getElementById('apiKey').value.trim();
+  const model = document.getElementById('modelInput').value.trim();
+  if (apiKey) form.append('api_key', apiKey);
+  if (model) form.append('model', model);
+
+  resultCard.style.display = 'none';
+  setBusy(true, 'Reading the PO with OpenAI — this usually takes 10–30s…');
+  try {
+    const res = await fetch('/api/shipping/read', { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Request failed');
+    lastPo = data.po;
+    setValues(data.values);
+    reviewCard.style.display = 'block';
+    reviewCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (e) {
+    resultCard.style.display = 'block';
+    resultBody.innerHTML = `<div class="error-box">${escapeHtml(e.message)}</div>`;
+  } finally {
+    setBusy(false);
+  }
+});
+
+document.getElementById('generateBtn').addEventListener('click', async () => {
+  const values = getValues();
+  if (!values.product.trim()) { alert('Product is empty — fill it in first.'); return; }
+  const btn = document.getElementById('generateBtn');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/shipping/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(values),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Request failed');
+    const notes = (data.notes || []).map(n => `<p class="muted">${escapeHtml(n)}</p>`).join('');
+    const rows = Object.entries(data.cells)
+      .map(([ref, val]) => `<tr><td>${escapeHtml(ref)}</td><td>${escapeHtml(val)}</td></tr>`).join('');
+    resultCard.style.display = 'block';
+    resultBody.innerHTML = `
+      <div style="margin:6px 0 14px;">
+        <a href="${data.download_url}" download style="display:inline-block;padding:8px 14px;border:1px solid var(--accent);border-radius:8px;color:var(--accent);font-size:13px;font-weight:600;text-decoration:none;">&#11015; ${escapeHtml(data.filename)}</a>
+      </div>
+      ${notes}
+      <h3 style="font-size:14px;margin-bottom:8px;">Cells written</h3>
+      <table class="plain"><thead><tr><th>Cell</th><th>Value</th></tr></thead><tbody>${rows}</tbody></table>
+      <p class="muted" style="margin-top:10px;">Everything else in the sheet is its own text or its own formulas — untouched.</p>`;
+    resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (e) {
+    resultCard.style.display = 'block';
+    resultBody.innerHTML = `<div class="error-box">${escapeHtml(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

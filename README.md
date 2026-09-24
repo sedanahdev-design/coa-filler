@@ -122,6 +122,42 @@ Every result screen tells you exactly what was matched, what was appended, and
 what was left untouched, so you always know what to double-check before sending
 the document out.
 
+## Shipping Instructions page (Purchase Order &rarr; Excel)
+
+`/shipping.html` turns a customer Purchase Order PDF into the filled
+**Shipping Instructions** Excel sheet (`forms/shipping/shipping_instructions.xlsx`).
+
+1. Upload the PO. OpenAI reads: product name (the Description column's material
+   name only &mdash; "Adapalene EP with Bacterial test as per typical" &rarr;
+   "Adapalene EP"), quantity + unit, unit price, total, the Shipping terms
+   (&rarr; Inco terms, and Air vs Sea), the Vendor's country (&rarr; Origin), and
+   the Consignee block.
+2. The page shows those values for you to correct.
+3. The sheet is filled by editing its XML in place, so all styling, merged cells,
+   column widths, conditional formatting and print setup survive, and only the
+   *input* cells are written:
+
+   | Cell | Filled with |
+   | --- | --- |
+   | A6  | `Air Shipment` / `Sea Shipment` |
+   | B8  | Product |
+   | B9  | Quantity |
+   | A10 | `Price per <UNIT>:` |
+   | B10 | Price per unit |
+   | C9  | `Inco terms: ...` |
+   | C10 | total &mdash; keeps the sheet's `=B9*B10` formula unless the PO's own total disagrees |
+   | B11 | Specs (only if you type something; otherwise the template's wording stays) |
+   | B12 | Origin |
+   | B14 | Label type (`full` / `Neutral`) |
+   | B28 | Consignee &amp; Notify Parties |
+
+   Everything else is the sheet's own text or its own formulas, which keep
+   working: `B22` Made in follows Origin, `A26` follows the label type, `C14`
+   adds the neutral-label note, `A27`/`A29`/`B29` switch on Air vs Sea, and the
+   document rows switch between CCPIT (China) and Chamber of Commerce.
+   Cached formula results are recomputed on the way out and the workbook is
+   flagged for full recalculation, so it reads correctly the moment it opens.
+
 ## Architecture
 
 ```
@@ -131,9 +167,13 @@ coa-filler/
     pdf_extract.py  PDF -> text / page images / embedded images (pdfplumber, pypdfium2, pypdf)
     ai_extract.py   OpenAI call + structured JSON schema + signature crop
     docx_fill.py    Generic label/value + results-table + signature fill engine (python-docx)
+    po_extract.py   OpenAI call + schema for Purchase Orders (Shipping Instructions page)
+    shipping_xlsx.py  Fills the Shipping Instructions .xlsx in place (zip + lxml), keeps its formulas
   frontend/
     index.html      Single-page vanilla JS/CSS UI
+    shipping.html   Purchase Order -> Shipping Instructions Excel page
   templates/        Your Word templates (.docx)
+  forms/            Per-customer document forms + the Shipping Instructions .xlsx template
   generated/        Output files land here (also served via /api/download)
   Dockerfile
   docker-compose.yml

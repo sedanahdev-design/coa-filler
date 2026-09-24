@@ -4,7 +4,9 @@ FastAPI backend for the CoA (Certificate of Analysis) -> Word template filler.
 Endpoints:
   GET  /api/templates          -> list available .docx templates
   POST /api/generate           -> upload a PDF + pick a template -> AI-extract + fill -> returns a report + download id
-  GET  /api/download/{file_id} -> download the generated .docx
+  POST /api/shipping/read      -> upload a Purchase Order PDF -> AI-extract the shipping-instruction fields
+  POST /api/shipping/generate  -> fill the Shipping Instructions .xlsx from those (user-checked) fields
+  GET  /api/download/{file_id} -> download the generated .docx / .xlsx
 
 Run with:  uvicorn main:app --reload --port 8420   (from the backend/ directory)
 """
@@ -17,6 +19,7 @@ import traceback
 import uuid
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -35,6 +38,8 @@ import forms_extract
 import forms_registry
 import pdf_extract
 import pdf_layout_dump
+import po_extract
+import shipping_xlsx
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 TEMPLATES_DIR = BASE_DIR / "templates"
@@ -430,18 +435,124 @@ async def generate_form(
     )
 
 
+# --------------------------------------------------------------------------- #
+# Shipping Instructions (Purchase Order PDF -> Shipping Instructions .xlsx)
+# --------------------------------------------------------------------------- #
+
+
+class ShippingValues(BaseModel):
+    """The sheet's input cells, as shown on the review form. Everything else in
+    the workbook is either static text or one of the sheet's own formulas."""
+
+    shipment_mode: str = "Air"       # A6  -> "Air Shipment" / "Sea Shipment"
+    product: str = ""                # B8  (also drives B16 via the sheet)
+    quantity: float = 0              # B9
+    unit: str = "KG"                 # relabels A10 ("Price per KG:")
+    price_per_unit: float = 0        # B10
+    total: float = 0                 # C10 (kept as =B9*B10 when they agree)
+    incoterms: str = ""              # C9  -> "Inco terms: ..."
+    origin: str = ""                 # B12 (also drives B22 "Made in" + CCPIT/CoC rows)
+    consignee: str = ""              # B28
+    label_type: str = "full"         # B14 (also drives C14 + A26)
+    specs: str = ""                  # B11 -- blank keeps the template's own wording
+
+
+@app.post("/api/shipping/read")
+async def shipping_read(
+    po_file: UploadFile = File(...),
+    api_key: Optional[str] = Form(None),
+    model: Optional[str] = Form(None),
+):
+    """Read a Purchase Order PDF and return the fields for the review form."""
+    key = (api_key or "").strip() or os.getenv("OPENAI_API_KEY")
+    if not key:
+        raise HTTPException(
+            400,
+            "No OpenAI API key available. Either add OPENAI_API_KEY to the server's "
+            ".env file, or paste a key into the 'OpenAI API key' field in the form.",
+        )
+
+    ext = Path(po_file.filename or "").suffix.lower()
+    if ext != ".pdf":
+        raise HTTPException(400, "Upload the Purchase Order as a PDF.")
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            shutil.copyfileobj(po_file.file, tmp)
+            tmp_path = tmp.name
+
+        try:
+            extraction = pdf_extract.extract_all(tmp_path)
+        except Exception as e:
+            raise HTTPException(400, f"Couldn't read that PDF: {e}")
+
+        model_name = (model or "").strip() or os.getenv("OPENAI_MODEL") or po_extract.DEFAULT_MODEL
+        try:
+            po = po_extract.extract_po_data(extraction, api_key=key, model=model_name)
+        except Exception as e:
+            print("=" * 70)
+            print(f"[coa-filler:shipping] OpenAI PO-extraction call failed (model={model_name})")
+            traceback.print_exc()
+            print("=" * 70)
+            raise HTTPException(500, f"OpenAI extraction failed: {e}")
+
+        print("=" * 70)
+        print(f"[coa-filler:shipping] model={model_name} po={po.raw}")
+        print("=" * 70)
+
+        return JSONResponse({"po": po.as_dict(), "values": shipping_xlsx.build_values(po)})
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+@app.post("/api/shipping/generate")
+def shipping_generate(values: ShippingValues):
+    """Fill the Shipping Instructions workbook from the (user-checked) fields."""
+    data = values.model_dump() if hasattr(values, "model_dump") else values.dict()
+    out_id = f"{uuid.uuid4().hex}.xlsx"
+    try:
+        report = shipping_xlsx.fill_shipping_instructions(data, GENERATED_DIR / out_id)
+    except Exception as e:
+        print("=" * 70)
+        traceback.print_exc()
+        print("=" * 70)
+        raise HTTPException(500, f"Filling the Shipping Instructions sheet failed: {e}")
+
+    filename = shipping_xlsx.suggested_filename(data)
+    return JSONResponse(
+        {
+            "download_url": f"/api/download/{out_id}?name={quote(filename)}",
+            "filename": filename,
+            "cells": {k: str(v) for k, v in report["cells"].items()},
+            "notes": report["notes"],
+        }
+    )
+
+
 @app.get("/api/download/{file_id}")
-def download(file_id: str):
-    # file_id is a uuid hex + .docx generated by us -- reject anything else defensively.
-    if "/" in file_id or "\\" in file_id or not file_id.endswith(".docx"):
+def download(file_id: str, name: Optional[str] = None):
+    # file_id is a uuid hex + .docx/.xlsx generated by us -- reject anything else defensively.
+    if "/" in file_id or "\\" in file_id or not file_id.endswith((".docx", ".xlsx")):
         raise HTTPException(400, "Invalid file id")
     path = GENERATED_DIR / file_id
     if not path.exists():
         raise HTTPException(404, "File not found (it may have already been cleaned up)")
+    is_xlsx = file_id.endswith(".xlsx")
+    # `name` only sets the name the browser saves it under (the Shipping
+    # Instructions sheet is named after its product) -- never a file path.
+    download_name = Path(name).name if name else path.name
+    if is_xlsx and not download_name.lower().endswith(".xlsx"):
+        download_name += ".xlsx"
     return FileResponse(
         path,
-        filename=path.name,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=download_name,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            if is_xlsx
+            else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ),
     )
 
 
